@@ -99,7 +99,7 @@ class ImageGenerator:
                 continue
 
             logger.debug(
-                f"{f"[{i} / {gen_opts.count}]": >{count_str_len * 2 + 5}} generated {filename}]"
+                f"{f"[{i + 1} / {gen_opts.count}]": >{count_str_len * 2 + 5}} generated {filename}]"
             )
 
     def _generate_random_image(self, w: int, h: int) -> Image:

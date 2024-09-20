@@ -124,7 +124,7 @@ class Uploader:
             pass
 
     def _start_walker(
-        self, path: Path, file_queue: Queue, sentinel_count: int
+        self, path: Path, file_queue: FileQueue, sentinel_count: int
     ) -> Process:
         if not path.exists():
             raise ValueError(f"Path {path} does not exist")
@@ -138,7 +138,11 @@ class Uploader:
         return proc
 
     def _walk(
-        self, log_queue: LogQueue, path: Path, file_queue: Queue, sentinel_count: int
+        self,
+        log_queue: LogQueue,
+        path: Path,
+        file_queue: FileQueue,
+        sentinel_count: int,
     ) -> None:
         init_logger(log_queue, "walker", Level.DEBUG)
         logger = get_logger()
