@@ -1,12 +1,13 @@
 import argparse
+import asyncio
 import os
 import queue
 from datetime import datetime
 from multiprocessing import Manager, Process, Queue
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Awaitable, Protocol, Self
 
-import boto3
+import aioboto3
 
 import log
 from benchmark import benchmark
@@ -20,6 +21,10 @@ class S3Client(Protocol):
 
     def upload_file(self, file_name: Path, bucket: str, object_name: str) -> Any: ...
 
+    def __aenter__(self) -> Awaitable[Self]: ...
+
+    def __aexit__(self, *args: Any) -> Awaitable[None]: ...
+
 
 class S3ClientFactory(Protocol):
     def create_client(self) -> S3Client: ...
@@ -29,8 +34,8 @@ class Boto3S3ClientFactory:
     def __init__(self, url: str):
         self._url = url
 
-    def _create_session(self) -> boto3.session.Session:
-        return boto3.session.Session()
+    def _create_session(self) -> aioboto3.session.Session:
+        return aioboto3.session.Session()
 
     def create_client(self) -> S3Client:
         s = self._create_session()
@@ -75,7 +80,7 @@ class Uploader:
         for i in range(count):
             name = f"uploader_{i}"
             proc = Process(
-                target=self._upload,
+                target=self._uploader,
                 args=(self._log_queue, name, file_queue, self._client_factory),
             )
             procs.append(proc)
@@ -84,7 +89,7 @@ class Uploader:
 
         return procs
 
-    def _upload(
+    def _uploader(
         self,
         log_queue: LogQueue,
         name: str,
@@ -92,34 +97,49 @@ class Uploader:
         client_factory: S3ClientFactory,
     ):
         init_logger(log_queue, name, Level.DEBUG)
-        logger = get_logger()
-
         client = client_factory.create_client()
-        while True:
-            try:
-                filename = file_queue.get_nowait()
-            except queue.Empty:
-                continue
+        asyncio.run(self._upload_task(client, file_queue))
 
-            if filename is None:
-                break
+    async def _upload_task(self, client: S3Client, file_queue: FileQueue):
+        tasks: list[asyncio.Future[None]] = []
 
-            mod_dt = _get_update_time(filename)
-            bucket_name = mod_dt.strftime("%Y-%m-%d")
-            obj_name = mod_dt.strftime("%H-%M-%S") + filename.suffix
+        async with client as c:
+            while True:
+                try:
+                    filename = file_queue.get_nowait()
+                except queue.Empty:
+                    continue
 
-            try:
-                self._create_bucket_if_not_exists(client, bucket_name)
-                client.upload_file(filename, bucket_name, obj_name)
-                logger.debug(f"uploaded {filename} as {obj_name} to {bucket_name}")
-            except Exception as e:
-                logger.error(
-                    f"uploading {filename} as {obj_name} to {bucket_name}: {str(e)}"
+                if filename is None:
+                    break
+
+                mod_dt = _get_update_time(filename)
+                bucket_name = mod_dt.strftime("%Y-%m-%d")
+                obj_name = mod_dt.strftime("%H-%M-%S") + filename.suffix
+
+                task = asyncio.create_task(
+                    self._upload(c, filename, bucket_name, obj_name)
                 )
+                tasks.append(task)
 
-    def _create_bucket_if_not_exists(self, client: S3Client, name: str):
+            await asyncio.gather(*tasks)
+
+    async def _upload(
+        self, client: S3Client, filename: Path, bucket_name: str, obj_name: str
+    ):
+        logger = get_logger()
         try:
-            client.create_bucket(Bucket=name)
+            await self._create_bucket_if_not_exists(client, bucket_name)
+            await client.upload_file(filename, bucket_name, obj_name)
+            logger.debug(f"uploaded {filename} as {obj_name} to {bucket_name}")
+        except Exception as e:
+            logger.error(
+                f"uploading {filename} as {obj_name} to {bucket_name}: {str(e)}"
+            )
+
+    async def _create_bucket_if_not_exists(self, client: S3Client, name: str):
+        try:
+            await client.create_bucket(Bucket=name)
         except client.exceptions.BucketAlreadyOwnedByYou:
             pass
 
